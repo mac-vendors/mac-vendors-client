@@ -1,0 +1,37 @@
+# Pre-commit quality gates. Activate once per clone with:
+#   pip install -e ".[dev]" && pre-commit install
+# Hooks use the local environment (language: system), so the project's dev
+# tools and dependencies must be installed.
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check
+        entry: ruff check .
+        language: system
+        files: \.py$
+        pass_filenames: false
+      - id: ruff-format-check
+        name: ruff format --check
+        entry: ruff format --check .
+        language: system
+        files: \.py$
+        pass_filenames: false
+      - id: mypy
+        name: mypy
+        entry: mypy src/
+        language: system
+        files: \.py$
+        pass_filenames: false
+      - id: compile
+        name: python compileall
+        entry: python -m compileall -q src tests
+        language: system
+        files: \.py$
+        pass_filenames: false
+      - id: import-check
+        name: import package
+        entry: python -c "import mac_vendors_client"
+        language: system
+        files: \.py$
+        pass_filenames: false

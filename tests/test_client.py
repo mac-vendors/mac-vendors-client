@@ -123,11 +123,75 @@ class TestInfo:
         assert info.total_records == 0
         assert info.updated_at is None
 
+    def test_info_missing_metadata_table(self, tmp_path: Path) -> None:
+        import sqlite3
+
+        db_path = tmp_path / "nometa.db"
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "CREATE TABLE mac_addresses (id INTEGER PRIMARY KEY, assignment TEXT, "
+            "organization_name TEXT, organization_address TEXT, "
+            "range_begin INTEGER, range_end INTEGER, bits INTEGER)"
+        )
+        conn.commit()
+        conn.close()
+
+        with MacVendorsClient(db_path) as client:
+            assert client.info() == ExportInfo(updated_at=None, exported_at=None, total_records=0)
+
+
+def _write_min_db(path: Path) -> None:
+    """Write a minimal export DB with one MA-L row (VMware) at ``path``."""
+    import sqlite3
+
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "CREATE TABLE mac_addresses (id INTEGER PRIMARY KEY, assignment TEXT, "
+        "organization_name TEXT, organization_address TEXT, "
+        "range_begin INTEGER, range_end INTEGER, bits INTEGER)"
+    )
+    begin = int("005056".ljust(12, "0"), 16)
+    end = begin | ((1 << 24) - 1)
+    conn.execute(
+        "INSERT INTO mac_addresses (assignment, organization_name, organization_address, "
+        "range_begin, range_end, bits) VALUES (?, ?, ?, ?, ?, ?)",
+        ("005056", "VMware", "addr", begin, end, 24),
+    )
+    conn.commit()
+    conn.close()
+
 
 class TestOpen:
     def test_missing_file_raises(self, tmp_path: Path) -> None:
         with pytest.raises(FileNotFoundError):
             MacVendorsClient(tmp_path / "nope.db")
+
+    def test_directory_path_raises_file_not_found(self, tmp_path: Path) -> None:
+        # A directory exists() but is not a file; must not become an opaque
+        # OperationalError.
+        with pytest.raises(FileNotFoundError):
+            MacVendorsClient(tmp_path)
+
+    def test_non_sqlite_file_raises_database_error(self, tmp_path: Path) -> None:
+        import sqlite3
+
+        bad = tmp_path / "garbage.db"
+        bad.write_bytes(b"this is not a sqlite database")
+        # Fail fast at construction, not lazily on first query.
+        with pytest.raises(sqlite3.DatabaseError):
+            MacVendorsClient(bad)
+
+    def test_path_with_special_chars(self, tmp_path: Path) -> None:
+        # A path containing a space and '#' must be opened correctly (URI is
+        # percent-encoded), not misparsed into a different/empty database.
+        sub = tmp_path / "my data"
+        sub.mkdir()
+        db_path = sub / "v#1.db"
+        _write_min_db(db_path)
+        with MacVendorsClient(db_path) as client:
+            match = client.lookup("00:50:56:AA:BB:CC")
+        assert match is not None
+        assert match.organization_name == "VMware"
 
     def test_read_only(self, export_db: Path) -> None:
         # The connection is opened read-only; writes must fail.

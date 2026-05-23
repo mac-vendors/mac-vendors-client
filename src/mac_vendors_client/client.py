@@ -23,7 +23,9 @@ _LOOKUP_SQL = (
     "SELECT assignment, organization_name, organization_address, bits "
     "FROM mac_addresses "
     "WHERE range_begin <= ? AND range_end >= ? "
-    "ORDER BY bits DESC LIMIT 1"
+    # Most specific (largest bits) wins; range_begin DESC is a deterministic
+    # tie-breaker so overlapping equal-bits rows resolve to a stable result.
+    "ORDER BY bits DESC, range_begin DESC LIMIT 1"
 )
 
 
@@ -73,18 +75,40 @@ class MacVendorsClient:
             path: Path to the exported SQLite file.
 
         Raises:
-            FileNotFoundError: if the file does not exist.
+            FileNotFoundError: if the path does not exist or is not a file.
+            sqlite3.DatabaseError: if the file is not a valid SQLite database.
         """
         self._path = Path(path)
-        if not self._path.exists():
+        if not self._path.is_file():
             raise FileNotFoundError(f"Export database not found: {self._path}")
-        # Read-only URI connection; usable from multiple threads (reads only).
+        # Read-only connection. as_uri() percent-encodes the path so spaces and
+        # URI-significant characters ('#', '?', '%') survive intact.
+        # check_same_thread=False lets the client be used from a thread other
+        # than the one that created it; it does NOT make concurrent use safe -
+        # use one client per thread (or serialize) for parallel lookups.
         self._conn = sqlite3.connect(
-            f"file:{self._path.as_posix()}?mode=ro",
+            f"{self._path.resolve().as_uri()}?mode=ro",
             uri=True,
             check_same_thread=False,
         )
         self._conn.row_factory = sqlite3.Row
+        # Fail fast with a clear error if the file is not a SQLite database
+        # (sqlite3.connect is lazy and would otherwise only error on first use).
+        try:
+            self._conn.execute("PRAGMA schema_version")
+        except sqlite3.DatabaseError:
+            self._conn.close()
+            raise
+
+    def __del__(self) -> None:
+        # Best-effort cleanup if the caller never closed the client and did not
+        # use the context manager. Guarded for partial construction.
+        conn = getattr(self, "_conn", None)
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
     def close(self) -> None:
         """Close the underlying database connection."""
@@ -131,10 +155,12 @@ class MacVendorsClient:
         return match.organization_name if match is not None else None
 
     def lookup_batch(self, macs: Iterable[str]) -> dict[str, VendorMatch | None]:
-        """Look up many MACs, returning a mapping of input -> match (or None).
+        """Look up many MACs, returning a mapping of input string -> match (or None).
 
-        Invalid entries map to None rather than raising, so one bad address
-        does not abort the batch.
+        Invalid MAC inputs map to None rather than raising, so one malformed
+        address does not abort the batch. Results are keyed by the input
+        string, so duplicate inputs collapse to a single entry. (Database-level
+        errors are not swallowed - they propagate.)
         """
         results: dict[str, VendorMatch | None] = {}
         for mac in macs:
@@ -145,11 +171,15 @@ class MacVendorsClient:
         return results
 
     def info(self) -> ExportInfo:
-        """Return the export's metadata (timestamps and record count)."""
-        meta = {
-            row["key"]: row["value"]
-            for row in self._conn.execute("SELECT key, value FROM metadata")
-        }
+        """Return the export's metadata (timestamps and record count).
+
+        Missing keys - or a missing ``metadata`` table - yield None / 0 fields.
+        """
+        try:
+            rows = self._conn.execute("SELECT key, value FROM metadata").fetchall()
+        except sqlite3.OperationalError:
+            rows = []
+        meta = {row["key"]: row["value"] for row in rows}
         total_raw = meta.get("total_records")
         try:
             total = int(total_raw) if total_raw is not None else 0

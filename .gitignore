@@ -16,3 +16,7 @@ htmlcov/
 # Virtual environments
 .venv/
 venv/
+
+# Claude Code
+.claude/
+CLAUDE.md

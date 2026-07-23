@@ -1,5 +1,10 @@
 # mac-vendors-client
 
+[![PyPI](https://img.shields.io/pypi/v/mac-vendors-client.svg)](https://pypi.org/project/mac-vendors-client/)
+[![Python versions](https://img.shields.io/pypi/pyversions/mac-vendors-client.svg)](https://pypi.org/project/mac-vendors-client/)
+[![CI](https://github.com/mac-vendors/mac-vendors-client/actions/workflows/ci.yml/badge.svg)](https://github.com/mac-vendors/mac-vendors-client/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Lightweight, **offline** MAC address -> vendor lookups against a pre-built
 SQLite database export.
 

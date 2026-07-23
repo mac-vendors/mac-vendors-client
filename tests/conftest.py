@@ -1,8 +1,7 @@
 """Test fixtures: build a minimal export-format SQLite database.
 
-The schema mirrors mac-vendors-db's SQLite exporter exactly (mac_addresses +
-metadata) so the client is tested against the real contract without depending
-on mac-vendors-db.
+The schema mirrors the SQLite export format exactly (mac_addresses +
+metadata) so the client is tested against the real contract.
 """
 
 from __future__ import annotations

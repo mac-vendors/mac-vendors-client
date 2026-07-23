@@ -1,6 +1,6 @@
 """Offline MAC -> vendor lookup against an exported SQLite database.
 
-The database is produced by ``mac-vendors-db``'s SQLite exporter and has a
+The database is a SQLite export and has a
 single ``mac_addresses(assignment, organization_name, organization_address,
 range_begin, range_end, bits)`` table plus a ``metadata(key, value)`` table.
 Lookups resolve a MAC to the most specific (largest ``bits``) prefix whose

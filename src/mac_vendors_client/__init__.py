@@ -8,7 +8,7 @@ Example:
         if match:
             print(match.organization_name)
 
-The export file is produced by ``mac-vendors-db`` (the SQLite export format).
+The export file is a SQLite database in the MAC Vendors offline export format.
 This package has no third-party dependencies; it reads via the stdlib sqlite3.
 """
 

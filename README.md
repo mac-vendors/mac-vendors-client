@@ -1,15 +1,15 @@
 # mac-vendors-client
 
 Lightweight, **offline** MAC address -> vendor lookups against a pre-built
-SQLite database exported by [`mac-vendors-db`](../mac-vendors-db).
+SQLite database export.
 
 - **Zero dependencies** - reads the export via the standard library `sqlite3`.
 - **Fast** - range/bits index lookup, no network, no per-call cost.
 - **Read-only** - opens the export file read-only; never modifies it.
 
-This is the consumer-side companion to `mac-vendors-db`. Use it when you have
-a downloaded export file and want local lookups. For live queries against the
-hosted API, use the online SDK instead.
+Use it when you have a downloaded SQLite export and want fast, local lookups
+with no network calls. For live queries against the hosted API, use the online
+SDK ([`mac-vendors-sdk`](https://pypi.org/project/mac-vendors-sdk/)) instead.
 
 ## Install
 
@@ -45,7 +45,7 @@ wins when prefixes overlap (e.g. an MA-S assignment inside an MA-L block).
 
 ## The export contract
 
-The database is the SQLite artifact produced by `mac-vendors-db`'s exporter:
+The export is a SQLite database with this schema:
 
 ```sql
 CREATE TABLE mac_addresses (

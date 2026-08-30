@@ -24,7 +24,22 @@ class TestMacToInt:
         # A 6-hex OUI becomes the start of its 48-bit range.
         assert _mac_to_int("005056") == 0x005056000000
 
-    @pytest.mark.parametrize("bad", ["", "  ", "ZZ:ZZ", "00:50:56:GG", "0050560011223344"])
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            "",
+            "  ",
+            "ZZ:ZZ",
+            "00:50:56:GG",
+            "0050560011223344",
+            # int(x, 16) accepts all of these; each would otherwise be counted
+            # in the length and silently produce a wrong 48-bit value.
+            "+005056",
+            "00_50_56",
+            "0x5056",
+            "\u0660\u0661\u0662",  # Arabic-Indic digits
+        ],
+    )
     def test_invalid_raises(self, bad: str) -> None:
         with pytest.raises(ValueError):
             _mac_to_int(bad)
@@ -91,6 +106,15 @@ class TestBatch:
         assert results["00:50:56:AA:BB:CC"].organization_name == "VMware, Inc."
         assert results["FF:FF:FF:00:00:00"] is None
         assert results["bad-zz"] is None  # invalid -> None, does not abort batch
+
+    def test_batch_queries_each_input_once(self, export_db: Path) -> None:
+        # A repeated input collapses to one entry and costs one query.
+        statements: list[str] = []
+        with MacVendorsClient(export_db) as client:
+            client._conn.set_trace_callback(statements.append)
+            results = client.lookup_batch(["005056", "005056", "005056"])
+        assert list(results) == ["005056"]
+        assert sum("mac_addresses" in sql for sql in statements) == 1
 
 
 class TestInfo:

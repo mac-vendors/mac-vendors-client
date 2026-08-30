@@ -10,6 +10,7 @@ Lookups resolve a MAC to the most specific (largest ``bits``) prefix whose
 from __future__ import annotations
 
 import sqlite3
+import string
 from collections.abc import Iterable
 from pathlib import Path
 from types import TracebackType
@@ -18,6 +19,11 @@ from .models import ExportInfo, VendorMatch
 
 # Characters stripped from a MAC before parsing (":", "-", ".", whitespace).
 _MAC_SEPARATORS = str.maketrans("", "", ":-. \t\r\n")
+
+# int(value, 16) is too permissive to double as validation: it also accepts a
+# sign, an "0x" prefix, underscores and non-ASCII digits, which would then be
+# counted in len(cleaned) and silently shift the address to a wrong value.
+_HEX_DIGITS = frozenset(string.hexdigits)
 
 _LOOKUP_SQL = (
     "SELECT assignment, organization_name, organization_address, bits "
@@ -39,17 +45,17 @@ def _mac_to_int(mac: str) -> int:
     Raises:
         ValueError: if the input is empty, too long, or not valid hex.
     """
-    cleaned = mac.translate(_MAC_SEPARATORS).upper()
+    # No case folding: _HEX_DIGITS holds both cases and int(x, 16) is
+    # case-insensitive, so an upper() copy would be pure per-lookup waste.
+    cleaned = mac.translate(_MAC_SEPARATORS)
     if not cleaned:
         raise ValueError("empty MAC address")
+    if not _HEX_DIGITS.issuperset(cleaned):
+        raise ValueError(f"invalid MAC address: {mac!r}")
     if len(cleaned) > 12:
         raise ValueError(f"MAC address has more than 48 bits: {mac!r}")
-    try:
-        value = int(cleaned, 16)
-    except ValueError:
-        raise ValueError(f"invalid MAC address: {mac!r}") from None
     # Left-justify a short prefix to 48 bits (4 bits per missing hex digit).
-    return value << (4 * (12 - len(cleaned)))
+    return int(cleaned, 16) << (4 * (12 - len(cleaned)))
 
 
 class MacVendorsClient:
@@ -159,11 +165,14 @@ class MacVendorsClient:
 
         Invalid MAC inputs map to None rather than raising, so one malformed
         address does not abort the batch. Results are keyed by the input
-        string, so duplicate inputs collapse to a single entry. (Database-level
-        errors are not swallowed - they propagate.)
+        string, so a repeated input collapses to a single entry and costs a
+        single query. (Database-level errors are not swallowed - they
+        propagate.)
         """
         results: dict[str, VendorMatch | None] = {}
         for mac in macs:
+            if mac in results:  # a repeated input needs no second query
+                continue
             try:
                 results[mac] = self.lookup(mac)
             except ValueError:

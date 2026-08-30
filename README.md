@@ -33,8 +33,11 @@ with MacVendorsClient("vendors.db") as client:
         print(match.organization_name)  # "VMware, Inc."
         print(match.assignment, match.bits)
 
-    # Name only
+    # Full organization name only
     name = client.lookup_name("00-50-56-aa-bb-cc")
+
+    # Short brand name when the export carries one, full name otherwise
+    label = match.display_name if match else None
 
     # Batch (invalid entries map to None instead of raising)
     results = client.lookup_batch(["0050.56AA.BBCC", "FF:FF:FF:00:00:00"])
@@ -57,10 +60,11 @@ CREATE TABLE mac_addresses (
     id INTEGER PRIMARY KEY,
     assignment TEXT NOT NULL,
     organization_name TEXT,
-    organization_address TEXT,
+    organization_address TEXT,      -- absent from the minimal snapshot
     range_begin INTEGER NOT NULL,   -- 48-bit MAC range start
     range_end   INTEGER NOT NULL,   -- 48-bit MAC range end
-    bits INTEGER NOT NULL           -- 24 / 28 / 36
+    bits INTEGER NOT NULL,          -- 24 / 28 / 36
+    short_name TEXT                 -- only in the client feed and full export
 );
 CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT);  -- updated_at, exported_at, total_records
 ```
@@ -68,6 +72,23 @@ CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT);  -- updated_at, export
 A lookup resolves a MAC `M` to the row where
 `range_begin <= int(M) <= range_end`, ordered by `bits DESC` (most specific
 first).
+
+Exports come in several column shapes and the client reads the shape once when
+it opens the file:
+
+| Export | Extra columns | What you get |
+|---|---|---|
+| Free monthly snapshot (`minimal`) | none, and no `organization_address` | `organization_address` is `""` |
+| Client feed (`short_names`) | `short_name` | `short_name` / `display_name` |
+| Full export (`enriched`) | `short_name` and vendor enrichment | as above; enrichment columns are ignored |
+
+Only `assignment`, `organization_name`, `range_begin`, `range_end` and `bits`
+are required. A database without them is rejected when the client opens it, not
+on the first lookup.
+
+Use a **current** export. A history (`history` / `as_of`) export keeps several
+rows per assignment, and this client has no temporal filter, so a lookup there
+can resolve to a superseded row.
 
 ## License
 

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mac-vendors-client"
-version = "1.0.1"
+version = "1.1.0"
 description = "Lightweight offline MAC -> vendor lookup against an exported SQLite database"
 readme = "README.md"
 license = "MIT"

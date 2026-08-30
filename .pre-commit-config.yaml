@@ -15,7 +15,7 @@ repos:
         name: ruff format --check
         entry: ruff format --check .
         language: system
-        files: \.py$
+        files: \.(py|md)$
         pass_filenames: false
       - id: mypy
         name: mypy

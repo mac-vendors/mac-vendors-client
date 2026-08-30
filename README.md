@@ -30,7 +30,7 @@ from mac_vendors_client import MacVendorsClient
 with MacVendorsClient("vendors.db") as client:
     match = client.lookup("00:50:56:AA:BB:CC")
     if match:
-        print(match.organization_name)   # "VMware, Inc."
+        print(match.organization_name)  # "VMware, Inc."
         print(match.assignment, match.bits)
 
     # Name only

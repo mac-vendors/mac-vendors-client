@@ -1,10 +1,15 @@
 """Offline MAC -> vendor lookup against an exported SQLite database.
 
-The database is a SQLite export and has a
-single ``mac_addresses(assignment, organization_name, organization_address,
-range_begin, range_end, bits)`` table plus a ``metadata(key, value)`` table.
-Lookups resolve a MAC to the most specific (largest ``bits``) prefix whose
-``[range_begin, range_end]`` interval contains the address.
+The database is a SQLite export with a ``mac_addresses`` table plus a
+``metadata(key, value)`` table. Lookups resolve a MAC to the most specific
+(largest ``bits``) prefix whose ``[range_begin, range_end]`` interval contains
+the address.
+
+The exporter emits several column shapes and the client adapts to whichever it
+is handed: the free "minimal" snapshot has no ``organization_address`` and the
+licensed client feed appends ``short_name``. Only ``assignment``,
+``organization_name``, ``range_begin``, ``range_end`` and ``bits`` are
+required; any further column (the full export's vendor enrichment) is ignored.
 """
 
 from __future__ import annotations
@@ -25,14 +30,23 @@ _MAC_SEPARATORS = str.maketrans("", "", ":-. \t\r\n")
 # counted in len(cleaned) and silently shift the address to a wrong value.
 _HEX_DIGITS = frozenset(string.hexdigits)
 
-_LOOKUP_SQL = (
-    "SELECT assignment, organization_name, organization_address, bits "
-    "FROM mac_addresses "
-    "WHERE range_begin <= ? AND range_end >= ? "
-    # Most specific (largest bits) wins; range_begin DESC is a deterministic
-    # tie-breaker so overlapping equal-bits rows resolve to a stable result.
-    "ORDER BY bits DESC, range_begin DESC LIMIT 1"
-)
+# Columns every export shape carries. Anything else is optional and selected
+# as '' when absent, so a row reads the same whatever the export mode was.
+_REQUIRED_COLUMNS = ("assignment", "organization_name", "range_begin", "range_end", "bits")
+_OPTIONAL_COLUMNS = ("organization_address", "short_name")
+
+
+def _lookup_sql(columns: frozenset[str]) -> str:
+    """Build the lookup query for the columns this export actually has."""
+    selected = ", ".join(name if name in columns else f"'' AS {name}" for name in _OPTIONAL_COLUMNS)
+    return (
+        f"SELECT assignment, organization_name, {selected}, bits "
+        "FROM mac_addresses "
+        "WHERE range_begin <= ? AND range_end >= ? "
+        # Most specific (largest bits) wins; range_begin DESC is a deterministic
+        # tie-breaker so overlapping equal-bits rows resolve to a stable result.
+        "ORDER BY bits DESC, range_begin DESC LIMIT 1"
+    )
 
 
 def _mac_to_int(mac: str) -> int:
@@ -72,7 +86,7 @@ class MacVendorsClient:
     context manager).
     """
 
-    __slots__ = ("_conn", "_path")
+    __slots__ = ("_conn", "_path", "_sql")
 
     def __init__(self, path: str | Path) -> None:
         """Open the export database read-only.
@@ -82,7 +96,8 @@ class MacVendorsClient:
 
         Raises:
             FileNotFoundError: if the path does not exist or is not a file.
-            sqlite3.DatabaseError: if the file is not a valid SQLite database.
+            sqlite3.DatabaseError: if the file is not a valid SQLite database,
+                or is not a MAC vendor export.
         """
         self._path = Path(path)
         if not self._path.is_file():
@@ -102,9 +117,29 @@ class MacVendorsClient:
         # (sqlite3.connect is lazy and would otherwise only error on first use).
         try:
             self._conn.execute("PRAGMA schema_version")
+            self._sql = _lookup_sql(self._validated_columns())
         except sqlite3.DatabaseError:
             self._conn.close()
             raise
+
+    def _validated_columns(self) -> frozenset[str]:
+        """The columns of ``mac_addresses``, refusing a database without them.
+
+        Turns a foreign database into an error at construction rather than an
+        opaque "no such column" on the first lookup.
+        """
+        columns = frozenset(
+            str(row["name"]) for row in self._conn.execute("PRAGMA table_info(mac_addresses)")
+        )
+        missing = [name for name in _REQUIRED_COLUMNS if name not in columns]
+        if missing:
+            detail = (
+                "no mac_addresses table"
+                if not columns
+                else f"mac_addresses is missing {', '.join(missing)}"
+            )
+            raise sqlite3.DatabaseError(f"Not a MAC vendor export ({detail}): {self._path}")
+        return columns
 
     def __del__(self) -> None:
         # Best-effort cleanup if the caller never closed the client and did not
@@ -145,18 +180,25 @@ class MacVendorsClient:
             ValueError: if ``mac`` is not a valid (partial) MAC address.
         """
         mac_int = _mac_to_int(mac)
-        row = self._conn.execute(_LOOKUP_SQL, (mac_int, mac_int)).fetchone()
+        row = self._conn.execute(self._sql, (mac_int, mac_int)).fetchone()
         if row is None:
             return None
         return VendorMatch(
             assignment=row["assignment"],
             organization_name=row["organization_name"] or "",
+            # The SQL supplies '' for a column this export lacks; `or ""`
+            # covers a column that is there but NULL for this row.
             organization_address=row["organization_address"] or "",
             bits=row["bits"],
+            short_name=row["short_name"] or "",
         )
 
     def lookup_name(self, mac: str) -> str | None:
-        """Return only the vendor name for a MAC, or None if unknown."""
+        """Return the vendor's ``organization_name`` for a MAC, or None.
+
+        For the short brand name where the export carries one, use
+        ``lookup(...).display_name``.
+        """
         match = self.lookup(mac)
         return match.organization_name if match is not None else None
 

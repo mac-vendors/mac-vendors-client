@@ -12,15 +12,25 @@ class VendorMatch:
     Attributes:
         assignment: The matching IEEE assignment prefix (hex), e.g. "005056".
         organization_name: Vendor / organization name.
-        organization_address: Vendor address (may be empty).
+        organization_address: Vendor address. Empty when the export omits the
+            column (the free "minimal" snapshot does).
         bits: Prefix length in bits (24 = MA-L/CID, 28 = MA-M, 36 = MA-S/IAB).
             The most specific (largest ``bits``) match is returned.
+        short_name: Short brand name ("Cisco" for "Cisco Systems, Inc"), from
+            exports that carry the column. Empty otherwise - use
+            ``display_name`` rather than reading this directly.
     """
 
     assignment: str
     organization_name: str
     organization_address: str
     bits: int
+    short_name: str = ""
+
+    @property
+    def display_name(self) -> str:
+        """The short brand name if the export has one, else the full name."""
+        return self.short_name or self.organization_name
 
 
 @dataclass(frozen=True, slots=True)

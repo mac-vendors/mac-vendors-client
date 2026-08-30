@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
+from conftest import make_export_db
 
 from mac_vendors_client import ExportInfo, MacVendorsClient, VendorMatch
 from mac_vendors_client.client import _mac_to_int
@@ -98,6 +100,41 @@ class TestLookup:
                 client.lookup("not-a-mac-zz")
 
 
+class TestExportShapes:
+    """The exporter emits several column shapes; all must resolve a MAC."""
+
+    def test_minimal_export_has_no_address(self, minimal_export_db: Path) -> None:
+        # The free snapshot drops organization_address; a lookup must still
+        # work and report an empty address rather than raising OperationalError.
+        with MacVendorsClient(minimal_export_db) as client:
+            match = client.lookup("00:50:56:AA:BB:CC")
+        assert match is not None
+        assert match.organization_name == "VMware, Inc."
+        assert match.organization_address == ""
+        assert match.short_name == ""
+        assert match.display_name == "VMware, Inc."
+
+    def test_client_feed_carries_short_name(self, client_feed_db: Path) -> None:
+        with MacVendorsClient(client_feed_db) as client:
+            match = client.lookup("00:50:56:AA:BB:CC")
+            fallback = client.lookup("00:11:22:30:00:00")
+        assert match is not None
+        assert match.short_name == "VMware"
+        assert match.display_name == "VMware"
+        assert match.organization_name == "VMware, Inc."
+        # An empty short_name falls back to the full organization name.
+        assert fallback is not None
+        assert fallback.short_name == ""
+        assert fallback.display_name == "Broad Vendor"
+
+    def test_default_export_has_no_short_name(self, export_db: Path) -> None:
+        with MacVendorsClient(export_db) as client:
+            match = client.lookup("00:50:56:AA:BB:CC")
+        assert match is not None
+        assert match.short_name == ""
+        assert match.display_name == "VMware, Inc."
+
+
 class TestBatch:
     def test_batch_mixed(self, export_db: Path) -> None:
         with MacVendorsClient(export_db) as client:
@@ -128,61 +165,16 @@ class TestInfo:
         )
 
     def test_info_tolerates_bad_total_records(self, tmp_path: Path) -> None:
-        import sqlite3
-
-        db_path = tmp_path / "bad.db"
-        conn = sqlite3.connect(db_path)
-        conn.execute(
-            "CREATE TABLE mac_addresses (id INTEGER PRIMARY KEY, assignment TEXT, "
-            "organization_name TEXT, organization_address TEXT, "
-            "range_begin INTEGER, range_end INTEGER, bits INTEGER)"
-        )
-        conn.execute("CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT)")
-        conn.execute("INSERT INTO metadata VALUES ('total_records', 'not-a-number')")
-        conn.commit()
-        conn.close()
-
+        db_path = make_export_db(tmp_path / "bad.db", metadata={"total_records": "not-a-number"})
         with MacVendorsClient(db_path) as client:
             info = client.info()
         assert info.total_records == 0
         assert info.updated_at is None
 
     def test_info_missing_metadata_table(self, tmp_path: Path) -> None:
-        import sqlite3
-
-        db_path = tmp_path / "nometa.db"
-        conn = sqlite3.connect(db_path)
-        conn.execute(
-            "CREATE TABLE mac_addresses (id INTEGER PRIMARY KEY, assignment TEXT, "
-            "organization_name TEXT, organization_address TEXT, "
-            "range_begin INTEGER, range_end INTEGER, bits INTEGER)"
-        )
-        conn.commit()
-        conn.close()
-
+        db_path = make_export_db(tmp_path / "nometa.db", metadata=None)
         with MacVendorsClient(db_path) as client:
             assert client.info() == ExportInfo(updated_at=None, exported_at=None, total_records=0)
-
-
-def _write_min_db(path: Path) -> None:
-    """Write a minimal export DB with one MA-L row (VMware) at ``path``."""
-    import sqlite3
-
-    conn = sqlite3.connect(path)
-    conn.execute(
-        "CREATE TABLE mac_addresses (id INTEGER PRIMARY KEY, assignment TEXT, "
-        "organization_name TEXT, organization_address TEXT, "
-        "range_begin INTEGER, range_end INTEGER, bits INTEGER)"
-    )
-    begin = int("005056".ljust(12, "0"), 16)
-    end = begin | ((1 << 24) - 1)
-    conn.execute(
-        "INSERT INTO mac_addresses (assignment, organization_name, organization_address, "
-        "range_begin, range_end, bits) VALUES (?, ?, ?, ?, ?, ?)",
-        ("005056", "VMware", "addr", begin, end, 24),
-    )
-    conn.commit()
-    conn.close()
 
 
 class TestOpen:
@@ -197,30 +189,50 @@ class TestOpen:
             MacVendorsClient(tmp_path)
 
     def test_non_sqlite_file_raises_database_error(self, tmp_path: Path) -> None:
-        import sqlite3
-
         bad = tmp_path / "garbage.db"
         bad.write_bytes(b"this is not a sqlite database")
         # Fail fast at construction, not lazily on first query.
         with pytest.raises(sqlite3.DatabaseError):
             MacVendorsClient(bad)
 
+    def test_missing_mac_addresses_table_raises(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "empty.db"
+        conn = sqlite3.connect(db_path)
+        conn.execute("CREATE TABLE something_else (id INTEGER PRIMARY KEY)")
+        conn.commit()
+        conn.close()
+
+        with pytest.raises(sqlite3.DatabaseError, match="no mac_addresses table"):
+            MacVendorsClient(db_path)
+
+    def test_incomplete_mac_addresses_table_raises(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "partial.db"
+        conn = sqlite3.connect(db_path)
+        # A table of the right name but without the range columns: the lookup
+        # could never work, so it must fail at open, not on the first query.
+        conn.execute(
+            "CREATE TABLE mac_addresses (id INTEGER PRIMARY KEY, assignment TEXT, "
+            "organization_name TEXT)"
+        )
+        conn.commit()
+        conn.close()
+
+        with pytest.raises(sqlite3.DatabaseError, match="range_begin, range_end, bits"):
+            MacVendorsClient(db_path)
+
     def test_path_with_special_chars(self, tmp_path: Path) -> None:
         # A path containing a space and '#' must be opened correctly (URI is
         # percent-encoded), not misparsed into a different/empty database.
         sub = tmp_path / "my data"
         sub.mkdir()
-        db_path = sub / "v#1.db"
-        _write_min_db(db_path)
+        db_path = make_export_db(sub / "v#1.db")
         with MacVendorsClient(db_path) as client:
             match = client.lookup("00:50:56:AA:BB:CC")
         assert match is not None
-        assert match.organization_name == "VMware"
+        assert match.organization_name == "VMware, Inc."
 
     def test_read_only(self, export_db: Path) -> None:
         # The connection is opened read-only; writes must fail.
-        import sqlite3
-
         with MacVendorsClient(export_db) as client:
             with pytest.raises(sqlite3.OperationalError):
                 client._conn.execute("DELETE FROM mac_addresses")

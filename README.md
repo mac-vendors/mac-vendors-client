@@ -86,9 +86,10 @@ Only `assignment`, `organization_name`, `range_begin`, `range_end` and `bits`
 are required. A database without them is rejected when the client opens it, not
 on the first lookup.
 
-Use a **current** export. A history (`history` / `as_of`) export keeps several
-rows per assignment, and this client has no temporal filter, so a lookup there
-can resolve to a superseded row.
+Do not point it at a **history** export: that mode keeps every version of an
+assignment (`valid_from` / `valid_to`) and this client has no temporal filter,
+so a lookup can resolve to a superseded row. A current or `as_of` export is a
+snapshot with one row per assignment and works normally.
 
 ## License
 

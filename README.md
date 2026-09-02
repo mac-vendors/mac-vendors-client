@@ -51,6 +51,33 @@ MAC input accepts any common format (`:`/`-`/`.` separators or bare hex), and
 a shorter prefix such as a 6-hex OUI. The most specific (largest-`bits`) match
 wins when prefixes overlap (e.g. an MA-S assignment inside an MA-L block).
 
+### Point-in-time lookups
+
+A **history** export keeps every version of an assignment. Against one of
+those, a plain lookup answers with the current version, and `as_of` asks what
+the registry said at an instant:
+
+```python
+from datetime import date
+from mac_vendors_client import MacVendorsClient, end_of_day
+
+with MacVendorsClient("mac_vendors_history.db") as client:
+    assert client.has_history  # False for every other mode
+
+    client.lookup_name("00:50:56:AA:BB:CC")  # the current vendor
+    client.lookup_name("005056", as_of="2006-08-20T00:00:00Z")
+    client.lookup_name("005056", as_of=end_of_day(date(2006, 8, 20)))
+```
+
+`as_of` takes a `datetime` or a string spelled the way the export's timestamp
+columns are (`YYYY-MM-DDTHH:MM:SSZ`); a `datetime` is spelled for you.
+`datetime.isoformat()` is **not** that spelling - it writes `+00:00` and a
+fractional part, both of which sort below `Z` and would quietly answer with the
+previous version. For a whole calendar day use `end_of_day(day)`: a bare date
+sorts below every timestamp on it, so it would export the day before. Passing a
+`date` raises rather than picking one of its two readings, and `as_of` against
+an export that keeps no versions raises too.
+
 ## The export contract
 
 The export is a SQLite database with this schema:
@@ -74,22 +101,21 @@ A lookup resolves a MAC `M` to the row where
 first).
 
 Exports come in several column shapes and the client reads the shape once when
-it opens the file:
+it opens the file. Every mode resolves a MAC; what differs is how much each
+match carries:
 
 | Export | Extra columns | What you get |
 |---|---|---|
 | Free monthly snapshot (`minimal`) | none, and no `organization_address` | `organization_address` is `""` |
 | Client feed (`short_names`) | `short_name` | `short_name` / `display_name` |
-| Full export (`enriched`) | `short_name` and vendor enrichment | as above; enrichment columns are ignored |
+| Full export (`enriched`) | `short_name`, `country_code`, `assignment_count`, `registries`, `first_seen`, `last_seen` | all of them on the match |
+| History dump (`history`) | `valid_from`, `valid_to` | the current version, or any past one via `as_of` |
+| Point-in-time (`as_of`) | none | one row per assignment, as of that instant |
 
 Only `assignment`, `organization_name`, `range_begin`, `range_end` and `bits`
 are required. A database without them is rejected when the client opens it, not
-on the first lookup.
-
-Do not point it at a **history** export: that mode keeps every version of an
-assignment (`valid_from` / `valid_to`) and this client has no temporal filter,
-so a lookup can resolve to a superseded row. A current or `as_of` export is a
-snapshot with one row per assignment and works normally.
+on the first lookup. A column the export does not carry reads as `""` (or `0`),
+so the same code works against every mode.
 
 ## License
 

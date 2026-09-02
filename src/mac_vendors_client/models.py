@@ -19,6 +19,17 @@ class VendorMatch:
         short_name: Short brand name ("Cisco" for "Cisco Systems, Inc"), from
             exports that carry the column. Empty otherwise - use
             ``display_name`` rather than reading this directly.
+
+        The last five are vendor-level enrichment, carried only by the full
+        ("enriched") export and blank in every other one. They describe the
+        organization rather than this assignment:
+
+        country_code: ISO 3166-1 alpha-2 country of the organization.
+        assignment_count: How many assignments the organization holds.
+        registries: The registries it appears in, comma-separated
+            ("MA-L,MA-S").
+        first_seen: When the organization was first recorded (ISO 8601).
+        last_seen: When its record last changed (ISO 8601).
     """
 
     assignment: str
@@ -26,6 +37,11 @@ class VendorMatch:
     organization_address: str
     bits: int
     short_name: str = ""
+    country_code: str = ""
+    assignment_count: int = 0
+    registries: str = ""
+    first_seen: str = ""
+    last_seen: str = ""
 
     @property
     def display_name(self) -> str:

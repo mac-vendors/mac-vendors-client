@@ -19,6 +19,7 @@ from importlib.metadata import version as _version
 
 from .client import MacVendorsClient
 from .models import ExportInfo, VendorMatch
+from .temporal import end_of_day, stored_timestamp
 
 try:
     __version__ = _version("mac-vendors-client")
@@ -30,4 +31,6 @@ __all__ = [
     "MacVendorsClient",
     "VendorMatch",
     "__version__",
+    "end_of_day",
+    "stored_timestamp",
 ]

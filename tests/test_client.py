@@ -3,12 +3,19 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import UTC, date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
-from conftest import make_export_db
+from conftest import CHANGED_AT, make_export_db
 
-from mac_vendors_client import ExportInfo, MacVendorsClient, VendorMatch
+from mac_vendors_client import (
+    ExportInfo,
+    MacVendorsClient,
+    VendorMatch,
+    end_of_day,
+    stored_timestamp,
+)
 from mac_vendors_client.client import _mac_to_int
 
 
@@ -134,6 +141,131 @@ class TestExportShapes:
         assert match.short_name == ""
         assert match.display_name == "VMware, Inc."
 
+    def test_enriched_export_carries_vendor_columns(self, enriched_export_db: Path) -> None:
+        with MacVendorsClient(enriched_export_db) as client:
+            match = client.lookup("00:50:56:AA:BB:CC")
+            unmatched = client.lookup("00:11:22:30:00:00")
+        assert match is not None
+        assert match.country_code == "US"
+        assert match.assignment_count == 3
+        assert match.registries == "MA-L,MA-S"
+        assert match.first_seen == "2004-06-11T00:00:00Z"
+        assert match.last_seen == "2026-01-01T00:00:00Z"
+        # A record with no vendors row to join reads blank, not None.
+        assert unmatched is not None
+        assert unmatched.country_code == ""
+        assert unmatched.assignment_count == 0
+
+    def test_export_without_enrichment_reads_blank(self, export_db: Path) -> None:
+        with MacVendorsClient(export_db) as client:
+            match = client.lookup("00:50:56:AA:BB:CC")
+        assert match is not None
+        assert match.country_code == ""
+        assert match.assignment_count == 0
+        assert match.registries == ""
+        assert match.first_seen == ""
+        assert match.last_seen == ""
+
+
+class TestHistoryExport:
+    """A history export holds every version, so a lookup has to pick one."""
+
+    def test_current_version_wins(self, history_export_db: Path) -> None:
+        # Both versions of 005056 cover this address with the same bits and the
+        # same range_begin, so only the current-row filter separates them.
+        with MacVendorsClient(history_export_db) as client:
+            match = client.lookup("00:50:56:AA:BB:CC")
+        assert match is not None
+        assert match.organization_name == "VMware, Inc."
+
+    def test_as_of_returns_the_version_of_that_day(self, history_export_db: Path) -> None:
+        with MacVendorsClient(history_export_db) as client:
+            before = client.lookup("00:50:56:AA:BB:CC", as_of="2005-01-01T00:00:00Z")
+            after = client.lookup("00:50:56:AA:BB:CC", as_of="2020-01-01T00:00:00Z")
+        assert before is not None
+        assert before.organization_name == "VMWARE INC"
+        assert after is not None
+        assert after.organization_name == "VMware, Inc."
+
+    def test_as_of_is_half_open_at_the_change(self, history_export_db: Path) -> None:
+        # The instant of the change belongs to the version that starts there.
+        with MacVendorsClient(history_export_db) as client:
+            assert client.lookup_name("005056", as_of=CHANGED_AT) == "VMware, Inc."
+            assert client.lookup_name("005056", as_of="2010-05-31T23:59:59Z") == "VMWARE INC"
+
+    def test_as_of_before_the_first_version_is_unknown(self, history_export_db: Path) -> None:
+        with MacVendorsClient(history_export_db) as client:
+            assert client.lookup("00:50:56:AA:BB:CC", as_of="1999-01-01T00:00:00Z") is None
+
+    def test_as_of_takes_a_datetime(self, history_export_db: Path) -> None:
+        # isoformat() would write "+00:00" and a fraction where the column
+        # writes "Z"; both sort below it and would answer with the old version.
+        moment = datetime(2020, 1, 1, 12, 30, 45, 500000, tzinfo=UTC)
+        with MacVendorsClient(history_export_db) as client:
+            assert client.lookup_name("005056", as_of=moment) == "VMware, Inc."
+            # Same instant, spelled in another zone: still the same answer.
+            elsewhere = moment.astimezone(timezone(timedelta(hours=5)))
+            assert client.lookup_name("005056", as_of=elsewhere) == "VMware, Inc."
+
+    def test_as_of_takes_a_naive_datetime_as_utc(self, history_export_db: Path) -> None:
+        with MacVendorsClient(history_export_db) as client:
+            assert client.lookup_name("005056", as_of=datetime(2005, 1, 1)) == "VMWARE INC"
+
+    def test_as_of_rejects_a_date(self, history_export_db: Path) -> None:
+        # A date has two readings; end_of_day names the one a lookup wants.
+        with MacVendorsClient(history_export_db) as client:
+            with pytest.raises(TypeError, match="end_of_day"):
+                client.lookup("005056", as_of=date(2020, 1, 1))  # type: ignore[arg-type]
+            assert client.lookup_name("005056", as_of=end_of_day(date(2005, 1, 1))) == "VMWARE INC"
+
+    def test_as_of_rejects_a_number(self, history_export_db: Path) -> None:
+        with MacVendorsClient(history_export_db) as client:
+            with pytest.raises(TypeError, match="str or datetime"):
+                client.lookup("005056", as_of=1234567890)  # type: ignore[arg-type]
+
+    def test_batch_as_of(self, history_export_db: Path) -> None:
+        with MacVendorsClient(history_export_db) as client:
+            results = client.lookup_batch(
+                ["005056", "001122", "bad-zz"], as_of="2005-01-01T00:00:00Z"
+            )
+        assert results["005056"] is not None
+        assert results["005056"].organization_name == "VMWARE INC"
+        assert results["001122"] is not None
+        assert results["bad-zz"] is None
+
+    def test_has_history(self, history_export_db: Path, export_db: Path) -> None:
+        with MacVendorsClient(history_export_db) as client:
+            assert client.has_history is True
+        with MacVendorsClient(export_db) as client:
+            assert client.has_history is False
+
+    def test_as_of_needs_a_history_export(self, export_db: Path) -> None:
+        with MacVendorsClient(export_db) as client:
+            with pytest.raises(ValueError, match="history export"):
+                client.lookup("005056", as_of="2005-01-01T00:00:00Z")
+
+    def test_batch_as_of_needs_a_history_export(self, export_db: Path) -> None:
+        # The per-address guard that maps a malformed MAC to None must not
+        # swallow this into a batch of Nones.
+        with MacVendorsClient(export_db) as client:
+            with pytest.raises(ValueError, match="history export"):
+                client.lookup_batch(["005056"], as_of="2005-01-01T00:00:00Z")
+
+
+class TestTemporalSpelling:
+    def test_stored_timestamp_drops_the_fraction_and_writes_z(self) -> None:
+        moment = datetime(2020, 1, 2, 3, 4, 5, 999999, tzinfo=UTC)
+        assert stored_timestamp(moment) == "2020-01-02T03:04:05Z"
+
+    def test_stored_timestamp_converts_to_utc(self) -> None:
+        moment = datetime(2020, 1, 2, 8, 4, 5, tzinfo=timezone(timedelta(hours=5)))
+        assert stored_timestamp(moment) == "2020-01-02T03:04:05Z"
+
+    def test_end_of_day_is_the_last_instant_of_the_day(self) -> None:
+        # A bare date sorts below every timestamp on it and would answer with
+        # the previous day.
+        assert end_of_day(date(2020, 1, 2)) == "2020-01-02T23:59:59Z"
+
 
 class TestBatch:
     def test_batch_mixed(self, export_db: Path) -> None:
@@ -143,6 +275,14 @@ class TestBatch:
         assert results["00:50:56:AA:BB:CC"].organization_name == "VMware, Inc."
         assert results["FF:FF:FF:00:00:00"] is None
         assert results["bad-zz"] is None  # invalid -> None, does not abort batch
+
+    def test_batch_does_not_swallow_a_database_error(self, export_db: Path) -> None:
+        # The per-address guard covers the MAC parse and nothing else: a failure
+        # from the query itself must propagate, not be reported as "unknown".
+        client = MacVendorsClient(export_db)
+        client.close()
+        with pytest.raises(sqlite3.ProgrammingError):
+            client.lookup_batch(["005056"])
 
     def test_batch_queries_each_input_once(self, export_db: Path) -> None:
         # A repeated input collapses to one entry and costs one query.
